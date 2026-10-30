@@ -34,7 +34,7 @@ const api = process.env.NEXT_PUBLIC_API_URL ? new URL(process.env.NEXT_PUBLIC_AP
 
 function policy(html) {
   const hashes = new Set();
-  for (const m of html.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script>/gi)) {
+  for (const m of html.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script\b[^>]*>/gi)) {
     if (/\bsrc\s*=/i.test(m[1]) || !m[2]) continue;
     hashes.add(`'sha256-${createHash("sha256").update(m[2], "utf8").digest("base64")}'`);
   }
