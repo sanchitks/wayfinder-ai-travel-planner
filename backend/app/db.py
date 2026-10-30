@@ -13,7 +13,7 @@ from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 
-from sqlalchemy import JSON, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, create_engine, event, inspect, text
+from sqlalchemy import JSON, Boolean, DateTime,ForeignKey, Integer, String, Text, UniqueConstraint, create_engine, event, inspect, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, relationship, sessionmaker
 
 from .config import get_settings
@@ -34,6 +34,8 @@ class User(Base):
     email: Mapped[str] = mapped_column(String(254), unique=True, index=True)
     # Empty for accounts created with Google that haven't set a password.
     password_hash: Mapped[str] = mapped_column(String(255))
+    # True once Google (or another provider) has confirmed this person owns the email address.
+    email_verified: Mapped[bool] = mapped_column(Boolean, default=False)
     avatar_url: Mapped[str] = mapped_column(String(500), default="")
     name: Mapped[str] = mapped_column(String(80))
     phone: Mapped[str] = mapped_column(String(20), default="")
@@ -83,6 +85,10 @@ class LoginSession(Base):
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    # Shown to the customer under "Where you're signed in" so they can spot and end strange logins.
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    device: Mapped[str] = mapped_column(String(80), default="")
+    ip_masked: Mapped[str] = mapped_column(String(64), default="")
 
     user: Mapped[User] = relationship(back_populates="sessions")
 
@@ -166,7 +172,11 @@ def init_db() -> None:
 
 def _add_missing_columns() -> None:
     """Tiny migration for databases created before a column existed."""
-    added = {"users": {"avatar_url": "VARCHAR(500) NOT NULL DEFAULT ''"}}
+    added = {
+        "users": {"avatar_url": "VARCHAR(500) NOT NULL DEFAULT ''", "email_verified": "BOOLEAN NOT NULL DEFAULT FALSE"},
+        "login_sessions": {"last_used_at": "TIMESTAMP WITH TIME ZONE", "device": "VARCHAR(80) NOT NULL DEFAULT ''",
+                           "ip_masked": "VARCHAR(64) NOT NULL DEFAULT ''"},
+    }
     insp = inspect(engine)
     with engine.begin() as conn:
         for table, cols in added.items():
@@ -174,6 +184,9 @@ def _add_missing_columns() -> None:
             for name, ddl in cols.items():
                 if name not in have:
                     conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}"))
+                    if name == "email_verified":  # accounts already linked to Google with the same email are verified
+                        conn.execute(text("UPDATE users SET email_verified = TRUE WHERE id IN (SELECT user_id FROM oauth_accounts"
+                                          " WHERE oauth_accounts.email = users.email)"))
 
 
 @contextmanager

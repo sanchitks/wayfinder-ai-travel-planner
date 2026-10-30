@@ -15,6 +15,8 @@ TMP = Path(tempfile.mkdtemp()) / "test.db"
 os.environ["DATABASE_URL"] = f"sqlite:///{TMP.as_posix()}"
 os.environ["COOKIE_SECURE"] = "false"  # the test client talks plain http
 
+os.environ["CHECK_BREACHED_PASSWORDS"] = "false"  # no network calls in tests
+
 from fastapi.testclient import TestClient  # noqa: E402
 
 from app.main import app  # noqa: E402

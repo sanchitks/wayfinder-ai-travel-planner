@@ -21,10 +21,13 @@ os.environ.update({
     "GOOGLE_CLIENT_SECRET": "test-secret", "ADMIN_EMAILS": "boss@example.com",
 })
 
+os.environ["CHECK_BREACHED_PASSWORDS"] = "false"  # no network calls in tests
+
 from fastapi.testclient import TestClient  # noqa: E402
 
 import app.google_auth as g  # noqa: E402
-from app.db import normalize_db_url  # noqa: E402
+from app.db import User, db_session, normalize_db_url  # noqa: E402
+from sqlalchemy import select  # noqa: E402
 from app.main import app  # noqa: E402
 
 failures = 0
@@ -93,6 +96,8 @@ with NoCookies(app) as c:
     vid = "ab" * 16
     c.post("/api/visits", json={"path": "/"}, headers={**UA, "X-Visitor-Id": vid})
     c.post("/api/auth/signup", json={"name": "Boss", "email": "boss@example.com", "password": "Boss-pass-2026"}, headers=TOKEN_MODE)
+    with db_session() as db:  # the owner has proved the address (signed in with Google before)
+        db.scalar(select(User).where(User.email == "boss@example.com")).email_verified = True
     boss = c.post("/api/auth/login", json={"email": "boss@example.com", "password": "Boss-pass-2026"}, headers=TOKEN_MODE).json()["session_token"]
     rows = c.get("/api/admin/visits", headers=bearer(boss)).json()["rows"]
     check(any(r["visitor"] == vid[:8] for r in rows), "the page's own visitor ID is used when cookies can't cross sites")

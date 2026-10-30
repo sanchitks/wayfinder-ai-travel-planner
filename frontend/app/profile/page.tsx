@@ -10,8 +10,8 @@ import Avatar from "@/components/Avatar";
 import ThemeSwitch from "@/components/ThemeSwitch";
 import UserMenu from "@/components/UserMenu";
 import {
-  ApiError, changePassword, deleteAccount, deleteTrip, downloadMyData, listTrips, updateProfile,
-  type ProfileInput, type TripSummary, type User,
+  ApiError, changePassword, deleteAccount, deleteTrip, downloadMyData, endOtherSessions, endSession, listSessions, listTrips,
+  updateProfile, type LoginSession, type ProfileInput, type TripSummary, type User,
 } from "@/lib/auth";
 import { DIETS, INTERESTS, PERSONAS, money, nightsBetween, shortDate } from "@/lib/format";
 import { destinationPhoto } from "@/lib/photos";
@@ -247,6 +247,77 @@ function YourData() {
   );
 }
 
+function when(iso: string | null): string {
+  if (!iso) return "";
+  const mins = Math.round((Date.now() - new Date(iso).getTime()) / 60000);
+  if (mins < 5) return "active now";
+  if (mins < 60) return `${mins} min ago`;
+  if (mins < 24 * 60) return `${Math.round(mins / 60)} h ago`;
+  return new Date(iso).toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" });
+}
+
+/** Every browser signed in to this account, so a strange one can be spotted and ended. */
+function SignedInDevices() {
+  const [sessions, setSessions] = useState<LoginSession[] | null>(null);
+  const [state, setState] = useState<{ busy?: string; ok?: string; error?: string }>({});
+  const load = useCallback(() => {
+    listSessions().then(setSessions).catch(() => setState({ error: "Couldn't load your signed-in devices." }));
+  }, []);
+  useEffect(load, [load]);
+
+  async function end(id?: string) {
+    setState({ busy: id ?? "all" });
+    try {
+      if (id) {
+        await endSession(id);
+        setState({ ok: "Signed out that device." });
+      } else {
+        const r = await endOtherSessions();
+        setState({ ok: r.signed_out ? `Signed out ${r.signed_out} other device${r.signed_out === 1 ? "" : "s"}.` : "No other devices were signed in." });
+      }
+      load();
+    } catch (err) {
+      setState({ error: err instanceof ApiError ? err.message : "Couldn't sign that device out." });
+    }
+  }
+
+  const others = (sessions ?? []).filter((s) => !s.current).length;
+  return (
+    <div className="card profile-card">
+      <div className="profile-section">
+        <h3><Icon name="monitor" size={18} /> Where you&apos;re signed in</h3>
+        <p className="small muted" style={{ marginTop: -4 }}>
+          If you see a device you don&apos;t recognise, sign it out and change your password.
+        </p>
+        {!sessions && !state.error && <div className="skeleton" style={{ height: 48 }} />}
+        {sessions?.map((s) => (
+          <div className="signin-method" key={s.id}>
+            <Icon name={/Mobile|Tablet/.test(s.device) ? "phone" : "monitor"} size={18} />
+            <div className="grow">
+              <b>{s.device}</b> {s.current && <span className="tag tag-leaf">This device</span>}
+              <div className="tiny muted">
+                {[s.ip && `IP ${s.ip}`, `signed in ${when(s.created_at)}`, !s.current && s.last_used_at && `last used ${when(s.last_used_at)}`]
+                  .filter(Boolean).join(" · ")}
+              </div>
+            </div>
+            {!s.current && (
+              <button type="button" className="btn btn-sm btn-ghost" onClick={() => end(s.id)} disabled={!!state.busy}>
+                {state.busy === s.id ? "Signing out…" : "Sign out"}
+              </button>
+            )}
+          </div>
+        ))}
+      </div>
+      <div className="profile-actions">
+        <span className={`small ${state.error ? "field-error" : "saved-note"}`} role="status">{state.error ?? state.ok ?? ""}</span>
+        <button type="button" className="btn btn-primary" onClick={() => end()} disabled={!!state.busy || others === 0}>
+          <Icon name="logout" size={15} /> {state.busy === "all" ? "Signing out…" : "Sign out everywhere else"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function Security({ user, onDeleted, onPasswordSet }: { user: User; onDeleted: () => void; onPasswordSet: () => void }) {
   const hasPassword = user.has_password;
   const google = user.linked_providers.includes("google");
@@ -327,6 +398,8 @@ function Security({ user, onDeleted, onPasswordSet }: { user: User; onDeleted: (
         </div>
       </form>
 
+      <SignedInDevices />
+
       <YourData />
 
       <form className="card profile-card danger-zone" onSubmit={remove} noValidate>
@@ -357,12 +430,14 @@ export default function ProfilePage() {
   const router = useRouter();
   const [tab, setTab] = useState<Tab>("profile");
   const [welcome, setWelcome] = useState(false);
+  const [passwordReset, setPasswordReset] = useState(false);
 
   useEffect(() => {
     const q = new URLSearchParams(window.location.search);
     const t = q.get("tab");
     if (t === "trips" || t === "security") setTab(t);
     setWelcome(q.get("welcome") === "1");
+    setPasswordReset(q.get("password_reset") === "1");
   }, []);
 
   const leaving = useRef(false); // account just deleted: go home, not to the login page
@@ -415,6 +490,17 @@ export default function ProfilePage() {
             <Icon name="sparkles" size={18} />
             <div><b>Welcome to Wayfinder, {user.name.split(" ")[0]}!</b> Add your home city and travel preferences below. They&apos;ll pre-fill every trip you plan.</div>
             <button className="btn btn-sm btn-ghost" onClick={() => setWelcome(false)} aria-label="Dismiss"><Icon name="x" size={14} /></button>
+          </div>
+        )}
+        {passwordReset && (
+          <div className="welcome-note" role="status">
+            <Icon name="lock" size={18} />
+            <div>
+              <b>Your Google account is now linked, and for your safety the old password was removed.</b> This email
+              hadn&apos;t been confirmed before, so we couldn&apos;t be sure who set that password. Every other device was
+              signed out. You can set a new password below.
+            </div>
+            <button className="btn btn-sm btn-ghost" onClick={() => setPasswordReset(false)} aria-label="Dismiss"><Icon name="x" size={14} /></button>
           </div>
         )}
         <nav className="tabs profile-tabs" role="tablist" aria-label="Profile sections">

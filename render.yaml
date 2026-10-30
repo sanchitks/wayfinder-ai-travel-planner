@@ -39,6 +39,9 @@ services:
         value: https://sanchitks.github.io
       - key: COOKIE_SECURE
         value: "true"
+      # No interactive API docs on the public server.
+      - key: API_DOCS
+        value: "false"
       # Render's load balancer sits on a private 10.x address and passes the visitor's IP along.
       - key: TRUSTED_PROXIES
         value: 10.0.0.0/8

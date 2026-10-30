@@ -9,6 +9,7 @@ TRUSTED_PROXIES; we then take the right-most address that isn't one of our own p
 from __future__ import annotations
 
 import ipaddress
+import re
 from functools import lru_cache
 
 from fastapi import Request
@@ -55,3 +56,25 @@ def client_ip(request: Request) -> str:
         if not _in(hop, nets):
             return hop if _is_ip(hop) else peer
     return hops[0] if hops and _is_ip(hops[0]) else peer
+
+
+def parse_agent(ua: str) -> tuple[str, str, str]:
+    """(browser, OS, device) from a User-Agent string."""
+    browser = ("Edge" if "Edg/" in ua else "Opera" if "OPR/" in ua or "Opera" in ua else "Samsung Internet" if "SamsungBrowser" in ua
+               else "Firefox" if "Firefox/" in ua or "FxiOS" in ua else "Chrome" if "Chrome/" in ua or "CriOS" in ua
+               else "Safari" if "Safari/" in ua else "Other")
+    os = ("iOS" if re.search(r"iPhone|iPad|iPod", ua) else "Android" if "Android" in ua else "Windows" if "Windows" in ua
+          else "macOS" if "Mac OS X" in ua or "Macintosh" in ua else "Linux" if "Linux" in ua else "Other")
+    device = ("Tablet" if re.search(r"iPad|Tablet", ua) or ("Android" in ua and "Mobile" not in ua)
+              else "Mobile" if re.search(r"Mobi|iPhone|iPod", ua) else "Desktop")
+    return browser, os, device
+
+
+def mask_ip(ip: str) -> str:
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return ""
+    if addr.version == 4:
+        return ".".join(str(addr).split(".")[:3]) + ".x"
+    return ":".join(addr.exploded.split(":")[:3]) + ":x"

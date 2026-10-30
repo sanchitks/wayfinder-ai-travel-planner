@@ -17,7 +17,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from .agents.graph import planner
-from .auth import optional_user_id, require_user_id, save_trip
+from .auth import optional_user_id, prune_expired_sessions, require_user_id, save_trip
 from .auth import router as auth_router
 from .config import get_settings
 from .db import init_db
@@ -28,6 +28,7 @@ from .llm import get_llm
 from .models import PlanRequest, RefineRequest, RouteRequest, SelectRequest
 from .personas import persona_catalog
 from .providers.routing import road_routes
+from .security import PLAN_LIMIT, REFINE_LIMIT, ROUTES_LIMIT, SecurityMiddleware, limit
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("wayfinder")
@@ -39,10 +40,12 @@ settings = get_settings()
 async def lifespan(_app: FastAPI):
     init_db()  # create the accounts/trips tables if they don't exist yet
     prune_old_visits()  # keep visit records for VISIT_RETENTION_DAYS only
+    prune_expired_sessions()
     yield
 
 
-app = FastAPI(title="Wayfinder - AI Travel Planning Multi-Agent System", version="1.0.0", lifespan=lifespan)
+app = FastAPI(title="Wayfinder - AI Travel Planning Multi-Agent System", version="1.0.0", lifespan=lifespan,
+              **({} if settings.api_docs else {"docs_url": None, "redoc_url": None, "openapi_url": None}))
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origin_list,  # explicit list: required when credentials (the login cookie) are allowed
@@ -50,6 +53,7 @@ app.add_middleware(
     allow_methods=["GET", "POST", "PUT", "DELETE"],
     allow_headers=["Content-Type", "Accept", "Authorization", "X-Auth-Mode", "X-Visitor-Id"],
 )
+app.add_middleware(SecurityMiddleware)  # added last = runs first: headers, cross-site check, size cap
 app.include_router(auth_router)
 app.include_router(google_router)
 app.include_router(admin_router)
@@ -79,9 +83,9 @@ async def _run(inputs: dict, session_id: str, user_id: int | None = None) -> Asy
                         yield _sse({"type": "saved", "trip_id": trip_id})
                     except Exception:
                         log.exception("saving trip failed")
-        except Exception as exc:
-            log.exception("planning run failed")
-            yield _sse({"type": "error", "message": str(exc)})
+        except Exception:
+            log.exception("planning run failed")  # details stay in the server log, not in the browser
+            yield _sse({"type": "error", "message": "Something went wrong while planning. Please try again."})
     yield _sse({"type": "done"})
 
 
@@ -110,7 +114,7 @@ async def personas() -> list[dict]:
     return persona_catalog()
 
 
-@app.post("/api/plan")
+@app.post("/api/plan", dependencies=[Depends(limit(PLAN_LIMIT, "You've planned a lot of trips in a short time. Please wait a few minutes."))])
 async def plan(body: PlanRequest, user_id: int | None = Depends(optional_user_id)) -> StreamingResponse:
     session_id = uuid.uuid4().hex
     inputs = {
@@ -132,14 +136,14 @@ async def _require_session(session_id: str) -> None:
         raise HTTPException(status_code=404, detail="Session expired - please plan the trip again.")
 
 
-@app.post("/api/refine")
+@app.post("/api/refine", dependencies=[Depends(limit(REFINE_LIMIT))])
 async def refine(body: RefineRequest, user_id: int | None = Depends(optional_user_id)) -> StreamingResponse:
     await _require_session(body.session_id)
     inputs = {"user_message": body.message, "is_refinement": True}
     return StreamingResponse(_run(inputs, body.session_id, user_id), media_type="text/event-stream", headers=_SSE_HEADERS)
 
 
-@app.post("/api/select")
+@app.post("/api/select", dependencies=[Depends(limit(REFINE_LIMIT))])
 async def select(body: SelectRequest, user_id: int | None = Depends(optional_user_id)) -> StreamingResponse:
     """Swap in an alternative flight/hotel shown in the UI, then recompile."""
     await _require_session(body.session_id)
@@ -147,7 +151,7 @@ async def select(body: SelectRequest, user_id: int | None = Depends(optional_use
     return StreamingResponse(_run(inputs, body.session_id, user_id), media_type="text/event-stream", headers=_SSE_HEADERS)
 
 
-@app.post("/api/routes")
+@app.post("/api/routes", dependencies=[Depends(limit(ROUTES_LIMIT))])
 async def routes(body: RouteRequest) -> dict:
     """Road routes (geometry, distance, time per leg) for the map. A null route means the
     routing servers couldn't route it; the map then draws straight lines."""

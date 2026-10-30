@@ -24,6 +24,8 @@ os.environ.update({
     "FRONTEND_URL": "http://localhost:3000",
 })
 
+os.environ["CHECK_BREACHED_PASSWORDS"] = "false"  # no network calls in tests
+
 from fastapi.testclient import TestClient  # noqa: E402
 
 import app.google_auth as g  # noqa: E402
@@ -120,7 +122,17 @@ with TestClient(app) as a, TestClient(app) as b, TestClient(app) as c:
     c.post("/api/auth/logout")
     loc = sign_in(c, sub="2222", email="ravi@gmail.com", name="Ravi K")
     me_c = c.get("/api/auth/me").json()
-    check(me_c["id"] == ravi_id and me_c["linked_providers"] == ["google"] and me_c["has_password"], "Google links to the existing account with that email")
+    check(me_c["id"] == ravi_id and me_c["linked_providers"] == ["google"] and me_c["email_verified"], "Google links to the existing account with that email")
+    # Nobody had proved owning ravi@gmail.com, so the password set at sign-up may be an attacker's:
+    # the Google owner takes over and the old password stops working.
+    check(not me_c["has_password"], "unverified account linked by Google: old password removed (pre-account takeover)")
+    check(c.post("/api/auth/login", json={"email": "ravi@gmail.com", "password": "Ravi-pass-2026"}).status_code == 401,
+          "the old password no longer signs in")
+    check(loc == "http://localhost:3000/profile?tab=security&password_reset=1", "they're told why, on the Security tab")
+    c.post("/api/profile/password", json={"new_password": "Ravi-new-2026"})
+    c.post("/api/auth/logout")
+    loc = sign_in(c, sub="2222", email="ravi@gmail.com", name="Ravi K")
+    check(c.get("/api/auth/me").json()["has_password"], "a password set after verification is kept on later Google sign-ins")
     check(loc == "http://localhost:3000/", "existing users go to the planner, new users to their profile")
 
     # Google-only user can set a password, and delete with typed confirmation

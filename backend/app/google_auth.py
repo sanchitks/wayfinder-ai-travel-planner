@@ -30,6 +30,7 @@ from sqlalchemy import select
 from .auth import _start_session
 from .config import get_settings
 from .db import OAuthAccount, User, db_session, utcnow
+from .security import RateLimiter, caller
 
 log = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/auth")
@@ -42,6 +43,8 @@ STATE_TTL = 600  # seconds to finish signing in at Google
 
 # state -> (PKCE verifier, nonce, next path, token mode, created at). In memory: fine for one server process.
 _PENDING: dict[str, tuple[str, str, str, bool, float]] = {}
+MAX_PENDING = 10_000
+_STARTS = RateLimiter(30, 10 * 60)  # sign-in attempts per address
 
 
 class GoogleSignInError(Exception):
@@ -103,8 +106,8 @@ async def exchange_code(code: str, verifier: str) -> dict:
     return decode_id_token(r.json().get("id_token", ""))
 
 
-def link_or_create(claims: dict) -> tuple[int, bool]:
-    """The Wayfinder user for this Google identity; returns (user id, newly created)."""
+def link_or_create(claims: dict) -> tuple[int, bool, bool]:
+    """The Wayfinder user for this Google identity; returns (user id, newly created, old password removed)."""
     sub, email = str(claims["sub"]), str(claims["email"]).strip().lower()
     name = " ".join(str(claims.get("name") or email.split("@")[0]).split())[:80]
     picture = str(claims.get("picture") or "")[:500]
@@ -114,18 +117,30 @@ def link_or_create(claims: dict) -> tuple[int, bool]:
             acct.email, acct.name, acct.picture, acct.last_login_at = email, name, picture, utcnow()
             if picture and not acct.user.avatar_url:
                 acct.user.avatar_url = picture
-            return acct.user_id, False
+            if acct.user.email == email:
+                acct.user.email_verified = True
+            return acct.user_id, False, False
         # Google has verified this email, so it is safe to link an existing account that uses it.
         user = db.scalar(select(User).where(User.email == email))
-        created = user is None
+        created, reset = user is None, False
         if created:
             user = User(email=email, password_hash="", name=name or "Traveller", avatar_url=picture, diets=[], interests=[])
             db.add(user)
             db.flush()
-        elif picture and not user.avatar_url:
-            user.avatar_url = picture
+        else:
+            if picture and not user.avatar_url:
+                user.avatar_url = picture
+            if not user.email_verified and user.password_hash:
+                # Nobody ever proved they own this address, so whoever set that password may not be its owner
+                # (someone can sign up with another person's email and wait). The Google owner takes the account
+                # over cleanly: the old password and every signed-in browser stop working.
+                user.password_hash, reset = "", True
+                for s in list(user.sessions):
+                    db.delete(s)
+                log.info("google sign-in took over unverified account %s: password and sessions cleared", user.id)
+        user.email_verified = True
         db.add(OAuthAccount(user_id=user.id, provider="google", subject=sub, email=email, name=name, picture=picture))
-        return user.id, created
+        return user.id, created, reset
 
 
 @router.get("/providers")
@@ -135,13 +150,18 @@ async def providers() -> dict:
 
 
 @router.get("/google/start")
-async def google_start(next: str | None = None, mode: str | None = None) -> RedirectResponse:
+async def google_start(request: Request, next: str | None = None, mode: str | None = None) -> RedirectResponse:
     s = get_settings()
     if not s.google_enabled:
         return _fail("google_not_configured")
+    if not _STARTS.check_and_hit(caller(request)):
+        return _fail("google_busy")
     now = time.time()
     for k in [k for k, v in _PENDING.items() if now - v[4] > STATE_TTL]:
         _PENDING.pop(k, None)
+    if len(_PENDING) >= MAX_PENDING:  # a flood of unfinished sign-ins: drop the oldest half
+        for k in sorted(_PENDING, key=lambda k: _PENDING[k][4])[: MAX_PENDING // 2]:
+            _PENDING.pop(k, None)
     state, verifier, nonce = secrets.token_urlsafe(24), secrets.token_urlsafe(64), secrets.token_urlsafe(16)
     _PENDING[state] = (verifier, nonce, _safe_next(next), mode == "token", now)
     query = urlencode({
@@ -167,15 +187,19 @@ async def google_callback(request: Request, code: str | None = None, state: str 
         return _fail("google_state")
     try:
         claims = check_claims(await exchange_code(code, verifier), nonce)
-        user_id, created = await asyncio.to_thread(link_or_create, claims)
+        user_id, created, reset = await asyncio.to_thread(link_or_create, claims)
     except GoogleSignInError as exc:
         return _fail(exc.code)
     except Exception:
         log.exception("google sign-in failed")
         return _fail("google_failed")
-    resp = _to_site(next_path or ("/profile?welcome=1" if created else "/"))
+    if reset:  # tell them why their old password no longer works
+        target = "/profile?tab=security&password_reset=1"
+    else:
+        target = next_path or ("/profile?welcome=1" if created else "/")
+    resp = _to_site(target)
     resp.delete_cookie(STATE_COOKIE, path="/api/auth/google")
-    token = await asyncio.to_thread(_start_session, resp, user_id)
+    token = await asyncio.to_thread(_start_session, resp, user_id, request)
     if wants_token:
         # Website on another site: hand the token over in the URL fragment, which browsers never
         # send to any server; the page stores it and removes it from the address bar at once.

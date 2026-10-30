@@ -68,7 +68,10 @@ export function recordVisit(path: string) {
 /** Download rows as a CSV file (opens in Excel / Google Sheets). */
 export function downloadCsv(filename: string, header: string[], rows: (string | number | null)[][]) {
   const cell = (v: string | number | null) => {
-    const s = v === null ? "" : String(v);
+    let s = v === null ? "" : String(v);
+    // A cell starting with = + - @ (or tab/CR) runs as a formula in Excel/Sheets: a customer named
+    // "=HYPERLINK(...)" could attack whoever opens the file. A leading apostrophe makes it plain text.
+    if (typeof v === "string" && /^[=+\-@\t\r]/.test(s)) s = `'${s}`;
     return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
   };
   const csv = "﻿" + [header, ...rows].map((r) => r.map(cell).join(",")).join("\r\n"); // BOM so Excel reads ₹ correctly

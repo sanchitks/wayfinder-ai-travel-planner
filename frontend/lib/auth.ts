@@ -20,6 +20,8 @@ export interface User {
   /** False for accounts created with Google that haven't set a password yet. */
   has_password: boolean;
   linked_providers: string[];
+  /** Google has confirmed this person owns the email address. */
+  email_verified: boolean;
   /** Can open the admin panel (/admin). */
   is_admin: boolean;
 }
@@ -144,7 +146,22 @@ export const GOOGLE_ERRORS: Record<string, string> = {
   google_failed: "Google sign-in didn't work. Please try again.",
   google_unverified: "Your Google account's email isn't verified, so we can't use it to sign you in.",
   google_not_configured: "Google sign-in isn't set up on this server yet.",
+  google_busy: "Too many sign-in attempts. Please wait a few minutes and try again.",
 };
+
+/** A browser signed in to this account. */
+export interface LoginSession {
+  id: string;
+  device: string;
+  ip: string;
+  created_at: string;
+  last_used_at: string | null;
+  current: boolean;
+}
+
+export const listSessions = () => call<LoginSession[]>("GET", "/api/profile/sessions");
+export const endSession = (id: string) => call<void>("DELETE", `/api/profile/sessions/${encodeURIComponent(id)}`);
+export const endOtherSessions = () => call<{ signed_out: number }>("POST", "/api/profile/sessions/sign-out-others");
 
 export const listTrips = () => call<TripSummary[]>("GET", "/api/trips");
 export const getTrip = (id: string) => call<{ id: string; session_id: string; itinerary: Itinerary }>("GET", `/api/trips/${encodeURIComponent(id)}`);

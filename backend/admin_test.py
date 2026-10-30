@@ -13,9 +13,13 @@ os.environ.update({"DATABASE_URL": f"sqlite:///{TMP.as_posix()}", "COOKIE_SECURE
                    "ADMIN_EMAILS": "Boss@Example.com", "FRONTEND_URL": "http://localhost:3000",
                    "TRUSTED_PROXIES": "10.0.0.0/8", "PRIVACY_CONTACT_EMAIL": "privacy@example.com"})
 
+os.environ["CHECK_BREACHED_PASSWORDS"] = "false"  # no network calls in tests
+
 from fastapi.testclient import TestClient  # noqa: E402
 
+from app.db import User, db_session  # noqa: E402
 from app.google_auth import link_or_create  # noqa: E402
+from sqlalchemy import select  # noqa: E402
 from app.main import app  # noqa: E402
 from app.net import client_ip  # noqa: E402
 from starlette.requests import Request  # noqa: E402
@@ -51,7 +55,11 @@ with TestClient(app) as guest, TestClient(app) as cust, TestClient(app) as boss,
     check(guest.get("/api/admin/summary").status_code == 401, "admin API needs a login")
     check(cust.get("/api/admin/customers").status_code == 403, "ordinary customers are refused (403)")
     boss.post("/api/auth/signup", json={"name": "Owner", "email": "boss@example.com", "password": "Boss-pass-2026"})
-    check(boss.get("/api/auth/me").json()["is_admin"] is True, "ADMIN_EMAILS account is an admin (case-insensitive)")
+    check(boss.get("/api/auth/me").json()["is_admin"] is False, "ADMIN_EMAILS alone isn't enough: the email must be proved first")
+    check(boss.get("/api/admin/summary").status_code == 403, "unverified look-alike admin account is refused")
+    with db_session() as db:  # as if the owner had signed in with Google before setting a password
+        db.scalar(select(User).where(User.email == "boss@example.com")).email_verified = True
+    check(boss.get("/api/auth/me").json()["is_admin"] is True, "verified ADMIN_EMAILS account is an admin (case-insensitive)")
     link_or_create({"sub": "g-1", "email": "google.user@gmail.com", "name": "Google User", "email_verified": True})
 
     # visits log

@@ -44,6 +44,11 @@ class Settings(BaseSettings):
 
     # --- App ---------------------------------------------------------------
     cors_origins: str = "http://localhost:3000,http://127.0.0.1:3000"
+    # The interactive API docs at /docs. Turn off in production so the API isn't advertised.
+    api_docs: bool = True
+    # Reject new passwords that appear in known data breaches (Have I Been Pwned, k-anonymity:
+    # only the first 5 characters of the password's SHA-1 ever leave the server).
+    check_breached_passwords: bool = True
 
     # --- Accounts ------------------------------------------------------------
     # SQLite file by default (git-ignored). For PostgreSQL: postgresql+psycopg://user:pass@host/db

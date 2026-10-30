@@ -70,17 +70,11 @@ backend/    Python FastAPI + LangGraph + Anthropic SDK (Claude Opus 5.5)
 Visitors can sign up and log in, at `/signup` and `/login`, and edit their profile at `/profile`. Profile details include name, phone, home city, usual travel style, budget, diet and interests. Those preferences pre-fill the trip form. While you're logged in, every trip you plan is saved automatically and updated as you refine it. Saved trips can be reopened from the profile; `/?trip=<id>` links open a single trip. A plan made while logged out can be saved by logging in from the "Log in to save this trip" link.
 
 - **Database.** SQLAlchemy with SQLite by default: `backend/data/wayfinder.db`, created on first start and git-ignored. For PostgreSQL, set `DATABASE_URL=postgresql+psycopg://user:pass@host/db` in `backend/.env` and `pip install psycopg`. Tables: `users`, `login_sessions`, `trips` (`backend/app/db.py`).
-- **Security** (`backend/app/auth.py`).
-  - **Passwords** are salted scrypt hashes; plain passwords are never stored.
-  - **Logins** use an HttpOnly, SameSite=Lax cookie holding a random token. Only its SHA-256 is stored.
-  - **Repeated failed logins** are rate-limited.
-  - **Changing your password** signs out your other devices.
-  - **Saved trips** are private to their owner.
-  - **Account deletion** removes the user's trips and sessions too.
-  - **HTTPS:** when you serve the site over HTTPS, set `COOKIE_SECURE=true`.
+- **Security.** See [Security](#security) below.
 - **Google sign-in** (`backend/app/google_auth.py`). "Continue with Google" uses the OAuth 2.0 authorization-code flow with PKCE, a browser-bound `state` and a `nonce`.
   - **Token checks:** the ID token's issuer, audience, expiry and verified email are checked before anyone is signed in.
-  - **Accounts:** a Google identity creates a user, or links to the existing user with the same email. The link is stored in the `oauth_accounts` table.
+  - **Accounts:** a Google identity creates a user, or links to the existing user with the same email. The link is stored in the `oauth_accounts` table, and the email is marked as verified.
+  - **No account takeover by email:** if that existing account was made with a password and its email was never verified, the old password is removed and its other logins are ended. Someone could have signed up with another person's email in advance. The customer is told why and can set a new password.
   - **Setup:** enter credentials as described in [KEYS.md](KEYS.md#google-sign-in-continue-with-google). Until then the button shows as not set up.
   - **No password needed:** Google-only users can add a password later in Security, and they delete their account by typing DELETE.
 - **Tests.** Both run against a throwaway database:
@@ -89,14 +83,14 @@ Visitors can sign up and log in, at `/signup` and `/login`, and edit their profi
 
 ## Admin panel
 
-`/admin` is for accounts whose email is listed in `ADMIN_EMAILS` in `backend/.env`. Separate several emails with commas. Admins see an "Admin panel" link in the avatar menu.
+`/admin` is for accounts whose email is listed in `ADMIN_EMAILS` in `backend/.env` **and verified**, by signing in with Google at least once. A look-alike account someone signed up for with the admin's email address can never open it. Separate several emails with commas. Admins see an "Admin panel" link in the avatar menu, and every admin request is logged.
 
 - **Overview.** Visitors and page views today and over the last 7 days, customer and trip counts, and a daily trend chart (7, 30 or 90 days) with a hover tooltip and a table view. It also lists top pages, popular destinations, devices, browsers, and the websites visitors came from.
 - **Visits.** Every page view: time (IST), the customer if signed in (otherwise an anonymous visitor ID), page, device, browser and OS, referring site, and IP address with its last part hidden. It's searchable and pages through 50 at a time.
 - **Customers.** Name, email, phone, home city, travel style, budget, diet and interests, sign-in methods, trips, visits, last seen and joined date.
 - **Passwords are never shown or sent.** Customers with a password show `••••••••`; Google-only customers show "None (Google)".
 - **Trips.** Every saved trip with its customer.
-- **CSV export.** Each table can be exported to CSV for Excel or Google Sheets.
+- **CSV export.** Each table can be exported to CSV for Excel or Google Sheets. Cells that would run as spreadsheet formulas (`=`, `+`, `-`, `@`) are exported as plain text.
 
 **How visits are recorded.** The website records page views through `POST /api/visits` (`backend/app/admin.py`), into the `visits` table.
 - Each browser gets a random visitor ID cookie (`wf_vid`).
@@ -116,6 +110,26 @@ Visitors can sign up and log in, at `/signup` and `/login`, and edit their profi
 - **Download my data** (Profile → Security, or `GET /api/profile/export`). A JSON file with the customer's profile, saved trips including full itineraries, sign-in methods and recorded visits. It never includes the password or its hash.
 - **Real visitor IPs behind a proxy.** When hosted behind Nginx, Render, Railway, Cloudflare and similar, list the proxy addresses or ranges in `TRUSTED_PROXIES`. Then `X-Forwarded-For` is used for the visit log and login rate limiting (`backend/app/net.py`). It's ignored from anyone else, so visitors can't fake it.
 
+## Security
+
+| Area | Protection | Where |
+|---|---|---|
+| Passwords | Salted scrypt hashes; plain passwords are never stored or logged. New passwords found in known data breaches are refused (Have I Been Pwned, k-anonymity: only 5 characters of the password's SHA-1 leave the server). | `auth.py` |
+| Logins | Random 256-bit session token; only its SHA-256 is stored. HttpOnly, Secure, SameSite=Lax cookie locally; `Authorization` header across sites. Expire after 30 days and are cleaned up on startup. | `auth.py` |
+| Password guessing | Rate limits per address (8 wrong passwords / 15 min) and per account (10 / 15 min, from any address). Same response time and message for unknown emails. | `auth.py` |
+| Your devices | Profile → Security lists every signed-in browser (device, partial IP, last used) and can sign any of them out, or all but this one. Changing the password signs out the rest. | `auth.py`, `app/profile` |
+| Google sign-in | Authorization code + PKCE, browser-bound `state`, `nonce`; issuer, audience, expiry and verified email checked. No takeover through unverified emails (above). | `google_auth.py` |
+| Admin panel | Listed **and** verified email required; customers' passwords are never sent; every admin request is logged. | `admin.py` |
+| Cross-site requests (CSRF) | POST/PUT/DELETE from any website other than ours are refused (`Origin` check), on top of SameSite cookies and a strict CORS list. | `security.py` |
+| Abuse and cost | Trip planning (which spends the paid flight-data quota), refinements, map routes, visit logging, sign-ups and Google sign-ins are rate-limited per address. Requests over 256 KB are refused. | `security.py` |
+| API responses | `X-Content-Type-Options`, `X-Frame-Options: DENY`, a deny-all CSP, `Referrer-Policy: no-referrer`, `Permissions-Policy`, HSTS on HTTPS, `Cache-Control: no-store` for account data. Internal errors are logged, never shown. `/docs` is off in production (`API_DOCS=false`). | `security.py`, `main.py` |
+| Website | Content-Security-Policy on every page: scripts only from the site itself plus each page's own inline scripts by SHA-256 hash, data only to the API, no plugins or frames. An injected script can't run or send the login token anywhere. The page refuses to show inside another site's frame (clickjacking). | `scripts/fix-export.mjs`, `app/layout.tsx` |
+| Data access | Every query is parameterised (SQLAlchemy). Saved trips are only visible to their owner; someone else's trip id returns "not found". | `auth.py` |
+| Secrets | API keys, the Google secret and the database URL live only in `backend/.env` (git-ignored) or the host's environment settings. | `.gitignore` |
+| Dependencies | Dependabot checks Python, npm and GitHub Actions weekly; GitHub secret scanning and CodeQL code scanning are on. | `.github/` |
+
+To report a vulnerability, see [SECURITY.md](SECURITY.md).
+
 ## Deployment (live demo)
 
 The live demo is three free pieces, all deployed from this repository.
@@ -132,6 +146,7 @@ The live demo is three free pieces, all deployed from this repository.
 1. **Database:** create a free Neon project and copy its connection string.
 2. **Server:** on Render, choose **New → Blueprint** and pick this repository.
    - Fill in the secret values it asks for: `DATABASE_URL`, `IGNAV_API_KEY`, `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_REDIRECT_URI`, `ADMIN_EMAILS` and `PRIVACY_CONTACT_EMAIL`.
+   - Sign in with Google once using an `ADMIN_EMAILS` address to unlock `/admin` for it.
    - Edit `FRONTEND_URL` and `CORS_ORIGINS` in `render.yaml` to match your own Pages address.
 3. **Website:** in the GitHub repository's settings:
    - Set **Pages → Source** to **GitHub Actions**.
@@ -224,6 +239,8 @@ cd backend
 .venv/Scripts/python auth_test.py          # sign-up, login, profile, saved trips, privacy between users
 .venv/Scripts/python google_auth_test.py   # Google sign-in flow (Google's token reply simulated)
 .venv/Scripts/python admin_test.py         # visit tracking, admin access, data export, proxy IPs
+.venv/Scripts/python token_mode_test.py    # login across two sites (GitHub Pages + Render)
+.venv/Scripts/python security_test.py      # headers, CSRF, size cap, rate limits, devices, leaked passwords
 ```
 
 ## License

@@ -211,18 +211,18 @@ class Itinerary(BaseModel):
 
 class PlanRequest(BaseModel):
     request: TripRequest
-    message: str = ""
+    message: str = Field("", max_length=2000)
 
 
 class RefineRequest(BaseModel):
-    session_id: str
+    session_id: str = Field(..., min_length=1, max_length=64)
     message: str = Field(..., min_length=1, max_length=2000)
 
 
 class SelectRequest(BaseModel):
-    session_id: str
+    session_id: str = Field(..., min_length=1, max_length=64)
     kind: Literal["flight", "hotel"]
-    id: str
+    id: str = Field(..., min_length=1, max_length=200)
 
 
 class RouteRequest(BaseModel):

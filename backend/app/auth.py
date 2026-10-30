@@ -21,20 +21,20 @@ import hmac
 import json
 import re
 import secrets
-import time
 import uuid
-from collections import defaultdict
 from datetime import UTC, datetime, timedelta
 from typing import Literal
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator
-from sqlalchemy import select
+from sqlalchemy import delete, select
 
 from .config import get_settings
 from .db import LoginSession, Trip, User, Visit, db_session, utcnow
-from .net import client_ip
+from .net import client_ip, mask_ip, parse_agent
+from .security import RateLimiter, caller
 
 router = APIRouter(prefix="/api")
 
@@ -66,20 +66,49 @@ def verify_password(password: str, stored: str) -> bool:
 
 _DUMMY_HASH = hash_password(secrets.token_hex(8))  # same work for unknown emails, so timing doesn't reveal accounts
 
-# ---------- rate limiting (in memory, per client address) ----------
-_FAILS: dict[str, list[float]] = defaultdict(list)
-MAX_FAILS, WINDOW = 8, 15 * 60
+# ---------- rate limiting (in memory) ----------
+# Wrong passwords per address, and per account so one account can't be guessed at from many addresses.
+_FAILS = RateLimiter(8, 15 * 60)
+_ACCOUNT_FAILS = RateLimiter(10, 15 * 60)
+# New accounts per address, so nobody can fill the database with throwaway accounts.
+_SIGNUPS = RateLimiter(10, 60 * 60)
+_TOO_MANY = "Too many attempts. Please wait a few minutes and try again."
 
 
-def _client(request: Request) -> str:
-    return client_ip(request) or "unknown"
+def _check_rate(key: str, limiter: RateLimiter = _FAILS) -> None:
+    if limiter.blocked(key):
+        raise HTTPException(429, _TOO_MANY)
 
 
-def _check_rate(key: str) -> None:
-    now = time.monotonic()
-    _FAILS[key] = [t for t in _FAILS[key] if now - t < WINDOW]
-    if len(_FAILS[key]) >= MAX_FAILS:
-        raise HTTPException(429, "Too many attempts. Please wait a few minutes and try again.")
+async def password_breached(password: str) -> bool:
+    """True if the password is in Have I Been Pwned's list of leaked passwords. Uses the k-anonymity
+    range API: only the first 5 hex characters of its SHA-1 are sent. If the service can't be reached
+    the check is skipped (sign-up must not depend on it)."""
+    if not get_settings().check_breached_passwords:
+        return False
+    digest = hashlib.sha1(password.encode()).hexdigest().upper()
+    try:
+        async with httpx.AsyncClient(timeout=3) as client:
+            r = await client.get(f"https://api.pwnedpasswords.com/range/{digest[:5]}", headers={"Add-Padding": "true"})
+        if r.status_code != 200:
+            return False
+    except httpx.HTTPError:
+        return False
+    for line in r.text.splitlines():
+        suffix, _, count = line.partition(":")
+        if suffix == digest[5:] and count.strip() not in ("", "0"):  # padding rows have a count of 0
+            return True
+    return False
+
+
+BREACHED = "This password has appeared in a data breach, so attackers try it first. Please choose a different one."
+
+
+def _device_label(request: Request | None) -> str:
+    if request is None:
+        return ""
+    browser, os, device = parse_agent(request.headers.get("user-agent", "")[:300])
+    return f"{browser} on {os} ({device})"[:80]
 
 
 # ---------- schemas ----------
@@ -100,6 +129,7 @@ class UserOut(BaseModel):
     # False for accounts created with Google that haven't set a password yet.
     has_password: bool = True
     linked_providers: list[str] = []
+    email_verified: bool = False
     is_admin: bool = False
 
     @classmethod
@@ -108,7 +138,9 @@ class UserOut(BaseModel):
                    budget=u.budget, diets=u.diets or [], interests=u.interests or [], bio=u.bio,
                    created_at=u.created_at, trip_count=trip_count, avatar_url=u.avatar_url or "",
                    has_password=bool(u.password_hash), linked_providers=sorted({a.provider for a in u.oauth_accounts}),
-                   is_admin=u.email.lower() in get_settings().admin_email_list)
+                   email_verified=bool(u.email_verified),
+                   # Same rule as the admin API (admin.is_admin): listed in ADMIN_EMAILS and email proved.
+                   is_admin=u.email.lower() in get_settings().admin_email_list and bool(u.email_verified))
 
 
 def _email(v: str) -> str:
@@ -231,12 +263,15 @@ def _hash_token(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
 
 
-def _start_session(response: Response, user_id: int) -> str:
+def _start_session(response: Response, user_id: int, request: Request | None = None) -> str:
     """Create a login session; sets the cookie and returns the token (for token mode)."""
     s = get_settings()
     token = secrets.token_urlsafe(32)
+    now = utcnow()
     with db_session() as db:
-        db.add(LoginSession(token_hash=_hash_token(token), user_id=user_id, expires_at=utcnow() + timedelta(days=s.session_days)))
+        db.add(LoginSession(token_hash=_hash_token(token), user_id=user_id, expires_at=now + timedelta(days=s.session_days),
+                            last_used_at=now, device=_device_label(request),
+                            ip_masked=mask_ip(client_ip(request)) if request else ""))
     response.set_cookie(COOKIE, token, max_age=s.session_days * 86400, httponly=True, samesite="lax", secure=s.cookie_secure, path="/")
     return token
 
@@ -270,11 +305,22 @@ def user_id_from_token(token: str | None) -> int | None:
         row = db.get(LoginSession, _hash_token(token))
         if not row:
             return None
-        expires = row.expires_at if row.expires_at.tzinfo else row.expires_at.replace(tzinfo=UTC)
-        if expires < utcnow():
+        now = utcnow()
+        if _aware(row.expires_at) < now:
             db.delete(row)
             return None
+        if row.last_used_at is None or now - _aware(row.last_used_at) > timedelta(minutes=5):  # don't write on every request
+            row.last_used_at = now
         return row.user_id
+
+
+def _aware(dt: datetime) -> datetime:
+    return dt if dt.tzinfo else dt.replace(tzinfo=UTC)
+
+
+def prune_expired_sessions() -> None:
+    with db_session() as db:
+        db.execute(delete(LoginSession).where(LoginSession.expires_at < utcnow()))
 
 
 async def optional_user_id(request: Request) -> int | None:
@@ -333,12 +379,15 @@ def _summary(t: Trip) -> TripSummary:
 # ---------- routes ----------
 @router.post("/auth/signup", status_code=201)
 async def signup(body: SignupIn, response: Response, request: Request) -> AuthOut:
-    _check_rate(f"signup:{_client(request)}")
+    ip = caller(request)
+    if not _SIGNUPS.check_and_hit(ip):
+        raise HTTPException(429, _TOO_MANY)
+    if await password_breached(body.password):
+        raise HTTPException(422, BREACHED)
 
     def create() -> int:
         with db_session() as db:
             if db.scalar(select(User.id).where(User.email == body.email)) is not None:
-                _FAILS[f"signup:{_client(request)}"].append(time.monotonic())
                 raise HTTPException(409, "An account with this email already exists. Try logging in.")
             u = User(email=body.email, password_hash=hash_password(body.password), name=body.name, diets=[], interests=[])
             db.add(u)
@@ -346,15 +395,16 @@ async def signup(body: SignupIn, response: Response, request: Request) -> AuthOu
             return u.id
 
     user_id = await asyncio.to_thread(create)
-    token = await asyncio.to_thread(_start_session, response, user_id)
+    token = await asyncio.to_thread(_start_session, response, user_id, request)
     user = await asyncio.to_thread(_load_user, user_id)
     return AuthOut(**user.model_dump(), session_token=token if token_mode(request) else None)
 
 
 @router.post("/auth/login")
 async def login(body: LoginIn, response: Response, request: Request) -> AuthOut:
-    key = f"login:{_client(request)}"
+    key, account = f"login:{caller(request)}", f"login:{body.email}"
     _check_rate(key)
+    _check_rate(account, _ACCOUNT_FAILS)
 
     def check() -> int | None:
         with db_session() as db:
@@ -364,10 +414,12 @@ async def login(body: LoginIn, response: Response, request: Request) -> AuthOut:
 
     user_id = await asyncio.to_thread(check)
     if user_id is None:
-        _FAILS[key].append(time.monotonic())
+        _FAILS.hit(key)
+        _ACCOUNT_FAILS.hit(account)
         raise HTTPException(401, "Email or password is incorrect.")
-    _FAILS.pop(key, None)
-    token = await asyncio.to_thread(_start_session, response, user_id)
+    _FAILS.reset(key)
+    _ACCOUNT_FAILS.reset(account)
+    token = await asyncio.to_thread(_start_session, response, user_id, request)
     user = await asyncio.to_thread(_load_user, user_id)
     return AuthOut(**user.model_dump(), session_token=token if token_mode(request) else None)
 
@@ -375,6 +427,61 @@ async def login(body: LoginIn, response: Response, request: Request) -> AuthOut:
 @router.post("/auth/logout", status_code=204)
 async def logout(request: Request, response: Response) -> None:
     await asyncio.to_thread(_end_session, response, session_token(request))
+
+
+class SessionOut(BaseModel):
+    id: str  # first 16 characters of the token's hash: names the session, can't be used to sign in
+    device: str
+    ip: str
+    created_at: datetime
+    last_used_at: datetime | None
+    current: bool
+
+
+@router.get("/profile/sessions")
+async def list_sessions(request: Request, user_id: int = Depends(require_user_id)) -> list[SessionOut]:
+    """Every browser signed in to this account, so the customer can spot one they don't recognise."""
+    mine = _hash_token(session_token(request) or "")
+
+    def load() -> list[SessionOut]:
+        with db_session() as db:
+            rows = db.scalars(select(LoginSession).where(LoginSession.user_id == user_id, LoginSession.expires_at >= utcnow())
+                              .order_by(LoginSession.created_at.desc())).all()
+            out = [SessionOut(id=r.token_hash[:16], device=r.device or "Unknown device", ip=r.ip_masked,
+                              created_at=_aware(r.created_at), last_used_at=_aware(r.last_used_at) if r.last_used_at else None,
+                              current=r.token_hash == mine) for r in rows]
+            return sorted(out, key=lambda s: not s.current)  # this browser first
+
+    return await asyncio.to_thread(load)
+
+
+@router.delete("/profile/sessions/{session_id}", status_code=204)
+async def end_session(session_id: str, user_id: int = Depends(require_user_id)) -> None:
+    if not re.fullmatch(r"[0-9a-f]{16}", session_id):
+        raise HTTPException(404, "Session not found.")
+
+    def remove() -> bool:
+        with db_session() as db:
+            rows = db.scalars(select(LoginSession).where(LoginSession.user_id == user_id,
+                                                         LoginSession.token_hash.startswith(session_id))).all()
+            for r in rows:
+                db.delete(r)
+            return bool(rows)
+
+    if not await asyncio.to_thread(remove):
+        raise HTTPException(404, "Session not found.")
+
+
+@router.post("/profile/sessions/sign-out-others")
+async def end_other_sessions(request: Request, user_id: int = Depends(require_user_id)) -> dict:
+    mine = _hash_token(session_token(request) or "")
+
+    def remove() -> int:
+        with db_session() as db:
+            res = db.execute(delete(LoginSession).where(LoginSession.user_id == user_id, LoginSession.token_hash != mine))
+            return res.rowcount or 0
+
+    return {"signed_out": await asyncio.to_thread(remove)}
 
 
 @router.get("/auth/me")
@@ -397,8 +504,10 @@ async def update_profile(body: ProfileIn, user_id: int = Depends(require_user_id
 @router.post("/profile/password", status_code=204, response_model=None)
 async def change_password(body: PasswordIn, request: Request, response: Response,
                           user_id: int = Depends(require_user_id)) -> Response | None:
-    key = f"password:{_client(request)}"
+    key = f"password:{caller(request)}"
     _check_rate(key)
+    if await password_breached(body.new_password):
+        raise HTTPException(422, BREACHED)
 
     def change() -> bool:
         with db_session() as db:
@@ -412,9 +521,9 @@ async def change_password(body: PasswordIn, request: Request, response: Response
             return True
 
     if not await asyncio.to_thread(change):
-        _FAILS[key].append(time.monotonic())
+        _FAILS.hit(key)
         raise HTTPException(400, "Your current password is incorrect.")
-    token = await asyncio.to_thread(_start_session, response, user_id)
+    token = await asyncio.to_thread(_start_session, response, user_id, request)
     if token_mode(request):  # the old token was just revoked: hand the page its new one
         return JSONResponse({"session_token": token})
     return None
@@ -422,7 +531,7 @@ async def change_password(body: PasswordIn, request: Request, response: Response
 
 @router.post("/profile/delete", status_code=204)
 async def delete_account(body: DeleteIn, request: Request, response: Response, user_id: int = Depends(require_user_id)) -> None:
-    key = f"delete:{_client(request)}"
+    key = f"delete:{caller(request)}"
     _check_rate(key)
 
     def remove() -> bool:
@@ -435,7 +544,7 @@ async def delete_account(body: DeleteIn, request: Request, response: Response, u
             return True
 
     if not await asyncio.to_thread(remove):
-        _FAILS[key].append(time.monotonic())
+        _FAILS.hit(key)
         raise HTTPException(400, "Password is incorrect." if body.password else "Type DELETE to confirm.")
     response.delete_cookie(COOKIE, path="/", samesite="lax", secure=get_settings().cookie_secure, httponly=True)
 

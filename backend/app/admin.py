@@ -12,7 +12,7 @@ sent: a stored password shows as a row of dots, a Google-only account as "Google
 from __future__ import annotations
 
 import asyncio
-import ipaddress
+import logging
 import re
 import secrets
 import time
@@ -27,8 +27,10 @@ from sqlalchemy import delete, func, or_, select
 from .auth import optional_user_id, require_user_id
 from .config import get_settings
 from .db import OAuthAccount, Trip, User, Visit, db_session, utcnow
-from .net import client_ip
+from .net import client_ip, mask_ip, parse_agent  # noqa: F401  (re-exported for tests)
+from .security import VISIT_LIMIT, limit
 
+log = logging.getLogger(__name__)
 router = APIRouter(prefix="/api")
 
 VISITOR_COOKIE = "wf_vid"
@@ -44,28 +46,6 @@ class VisitIn(BaseModel):
     referrer: str = Field(default="", max_length=1000)
 
 
-def parse_agent(ua: str) -> tuple[str, str, str]:
-    """(browser, OS, device) from a User-Agent string."""
-    browser = ("Edge" if "Edg/" in ua else "Opera" if "OPR/" in ua or "Opera" in ua else "Samsung Internet" if "SamsungBrowser" in ua
-               else "Firefox" if "Firefox/" in ua or "FxiOS" in ua else "Chrome" if "Chrome/" in ua or "CriOS" in ua
-               else "Safari" if "Safari/" in ua else "Other")
-    os = ("iOS" if re.search(r"iPhone|iPad|iPod", ua) else "Android" if "Android" in ua else "Windows" if "Windows" in ua
-          else "macOS" if "Mac OS X" in ua or "Macintosh" in ua else "Linux" if "Linux" in ua else "Other")
-    device = ("Tablet" if re.search(r"iPad|Tablet", ua) or ("Android" in ua and "Mobile" not in ua)
-              else "Mobile" if re.search(r"Mobi|iPhone|iPod", ua) else "Desktop")
-    return browser, os, device
-
-
-def mask_ip(ip: str) -> str:
-    try:
-        addr = ipaddress.ip_address(ip)
-    except ValueError:
-        return ""
-    if addr.version == 4:
-        return ".".join(str(addr).split(".")[:3]) + ".x"
-    return ":".join(addr.exploded.split(":")[:3]) + ":x"
-
-
 def _external_referrer(ref: str) -> str:
     """Only referrers from other sites are interesting (Google, Instagram...), not our own pages."""
     try:
@@ -78,7 +58,7 @@ def _external_referrer(ref: str) -> str:
     return f"{u.hostname}{u.path}"[:300]
 
 
-@router.post("/visits", status_code=204)
+@router.post("/visits", status_code=204, dependencies=[Depends(limit(VISIT_LIMIT))])
 async def record_visit(body: VisitIn, request: Request, response: Response,
                        user_id: int | None = Depends(optional_user_id)) -> None:
     ua = request.headers.get("user-agent", "")[:300]
@@ -122,14 +102,22 @@ def is_admin_email(email: str) -> bool:
     return email.lower() in get_settings().admin_email_list
 
 
-async def require_admin(user_id: int = Depends(require_user_id)) -> int:
+def is_admin(u: User) -> bool:
+    """An ADMIN_EMAILS address alone isn't enough: anyone can type an email at sign-up. The owner must
+    also have proved it (signed in with Google once), so a look-alike account can never be an admin."""
+    return is_admin_email(u.email) and bool(u.email_verified)
+
+
+async def require_admin(request: Request, user_id: int = Depends(require_user_id)) -> int:
     def check() -> bool:
         with db_session() as db:
             u = db.get(User, user_id)
-            return bool(u and is_admin_email(u.email))
+            return bool(u and is_admin(u))
 
     if not await asyncio.to_thread(check):
+        log.warning("admin access refused for user %s from %s", user_id, mask_ip(client_ip(request)))
         raise HTTPException(403, "This page is only for Wayfinder admins.")
+    log.info("admin %s: %s", user_id, request.url.path)
     return user_id
 
 
@@ -240,7 +228,7 @@ async def admin_customers(q: str = "", _: int = Depends(require_admin)) -> dict:
                     # Never the hash: dots when a password exists, otherwise how they sign in.
                     "password": PASSWORD_MASK if u.password_hash else "",
                     "sign_in": sorted({"email"} if u.password_hash else set()) + sorted({a.provider for a in u.oauth_accounts}),
-                    "is_admin": is_admin_email(u.email),
+                    "is_admin": is_admin(u), "email_verified": bool(u.email_verified),
                     "trips": trip_counts.get(u.id, 0), "visits": n_visits,
                     "last_seen": _aware(last_seen).isoformat() if last_seen else None,
                     "created_at": _aware(u.created_at).isoformat(),

@@ -24,7 +24,9 @@ export const viewport: Viewport = {
 };
 
 // Applies the saved theme before first paint (no flash). "light" is the default look; "auto" follows the device.
-const THEME_SCRIPT = `try{var t=localStorage.getItem("wf-theme")||"light";if(t!=="auto")document.documentElement.dataset.theme=t}catch(e){document.documentElement.dataset.theme="light"}`;
+// It also refuses to run inside another site's frame (clickjacking): GitHub Pages can't send the
+// X-Frame-Options header, so a framed page hides itself and tries to open in the full window instead.
+const THEME_SCRIPT = `try{var t=localStorage.getItem("wf-theme")||"light";if(t!=="auto")document.documentElement.dataset.theme=t}catch(e){document.documentElement.dataset.theme="light"}if(window.top!==window.self){document.documentElement.style.display="none";try{window.top.location.href=window.location.href}catch(e){}}`;
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
