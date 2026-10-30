@@ -1,5 +1,6 @@
 import { API_URL } from "./api";
 import { ApiError } from "./auth";
+import { authHeaders, visitorHeaders } from "./site";
 
 export interface CustomerRef { id: number; name: string; email: string }
 
@@ -39,7 +40,7 @@ async function get<T>(path: string, params: Record<string, string | number> = {}
   const qs = new URLSearchParams(Object.entries(params).map(([k, v]) => [k, String(v)])).toString();
   let res: Response;
   try {
-    res = await fetch(`${API_URL}${path}${qs ? `?${qs}` : ""}`, { credentials: "include" });
+    res = await fetch(`${API_URL}${path}${qs ? `?${qs}` : ""}`, { credentials: "include", headers: authHeaders() });
   } catch {
     throw new ApiError("Can't reach the server.", 0);
   }
@@ -58,7 +59,7 @@ export function recordVisit(path: string) {
   try {
     void fetch(`${API_URL}/api/visits`, {
       method: "POST", credentials: "include", keepalive: true,
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...authHeaders(), ...visitorHeaders() },
       body: JSON.stringify({ path, referrer: document.referrer || "" }),
     }).catch(() => {});
   } catch {}

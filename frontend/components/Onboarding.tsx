@@ -1,8 +1,10 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { AGENTS, DIETS, INTERESTS, PERSONAS, POPULAR_DESTINATIONS, isoDate, money, nightsBetween } from "@/lib/format";
+import Link from "next/link";
 import { PHOTO_CREDITS, destinationPhoto } from "@/lib/photos";
+import { asset } from "@/lib/site";
 import type { Health, Persona, TripRequest } from "@/lib/types";
 import { Icon, type IconName } from "./Icon";
 import ThemeSwitch from "./ThemeSwitch";
@@ -157,6 +159,13 @@ export default function Onboarding({
   }
 
   const liveCount = health ? Object.values(health.providers).filter((v) => v === "live").length : 0;
+  // Free hosting puts the server to sleep when idle; say so if the first answer is slow.
+  const [slowWake, setSlowWake] = useState(false);
+  useEffect(() => {
+    if (health !== undefined) return;
+    const t = setTimeout(() => setSlowWake(true), 4000);
+    return () => clearTimeout(t);
+  }, [health]);
   const hero = PHOTO_CREDITS.hero;
 
   return (
@@ -169,7 +178,7 @@ export default function Onboarding({
           </div>
           <div className="status-strip small">
             {health === undefined ? (
-              <span className="tag">Connecting to planner…</span>
+              <span className="tag">{slowWake ? "Waking up the server - free hosting sleeps when idle, about a minute…" : "Connecting to planner…"}</span>
             ) : health === null ? (
               <span className="tag" style={{ background: "var(--danger-soft)", color: "var(--danger)" }}>
                 <Icon name="alert" size={13} /> Backend offline - start it on :8000
@@ -192,7 +201,7 @@ export default function Onboarding({
         </div>
       </header>
 
-      <section className="hero" style={{ backgroundImage: "url(/photos/hero.jpg)" }}>
+      <section className="hero" style={{ backgroundImage: `url(${asset("/photos/hero.jpg")})` }}>
         <div className="hero-inner">
           <h1 className="hero-title">
             Your whole trip, planned by <span className="hero-mark">a team of AI agents</span>
@@ -422,7 +431,7 @@ export default function Onboarding({
         <p style={{ margin: "0 0 8px" }}>
           Privacy: we record which pages are visited, with the device, browser and a partly hidden IP address, to improve
           Wayfinder. Signed-in visits are linked to your account. Passwords are stored only as one-way hashes.{" "}
-          <a href="/privacy">Privacy Policy</a>
+          <Link href="/privacy">Privacy Policy</Link>
         </p>
         Photos from Wikimedia Commons:{" "}
         {Object.entries(PHOTO_CREDITS).filter(([, c], i, all) => all.findIndex(([, x]) => x.source === c.source) === i).map(([k, c], i) => (

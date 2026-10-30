@@ -11,6 +11,7 @@ import ThemeSwitch from "@/components/ThemeSwitch";
 import UserMenu from "@/components/UserMenu";
 import { SessionExpiredError, getHealth, planTrip, refineTrip, selectOption } from "@/lib/api";
 import { ApiError, getTrip, saveSession } from "@/lib/auth";
+import { pageUrl } from "@/lib/site";
 import { PERSONAS, money, nightsBetween, shortDate } from "@/lib/format";
 import type { AgentName, AgentState, ChatMessage, Health, Itinerary, StreamEvent, TripRequest } from "@/lib/types";
 
@@ -87,7 +88,7 @@ export default function Home() {
     const resume = q.get("resume");
     if (!tripId && !resume) return;
     linkHandled.current = true;
-    window.history.replaceState(null, "", "/");
+    window.history.replaceState(null, "", pageUrl("/"));
     if (tripId) {
       if (!user) {
         router.replace(`/login?next=${encodeURIComponent(`/?trip=${tripId}`)}`);

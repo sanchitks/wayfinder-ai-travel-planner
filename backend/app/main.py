@@ -48,7 +48,7 @@ app.add_middleware(
     allow_origins=settings.cors_origin_list,  # explicit list: required when credentials (the login cookie) are allowed
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE"],
-    allow_headers=["Content-Type", "Accept"],
+    allow_headers=["Content-Type", "Accept", "Authorization", "X-Auth-Mode", "X-Visitor-Id"],
 )
 app.include_router(auth_router)
 app.include_router(google_router)

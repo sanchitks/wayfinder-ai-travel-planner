@@ -13,6 +13,7 @@ import {
 } from "@/lib/admin";
 import { ApiError } from "@/lib/auth";
 import { PERSONAS, money } from "@/lib/format";
+import { pageUrl } from "@/lib/site";
 
 type Tab = "overview" | "visits" | "customers" | "trips";
 
@@ -386,7 +387,7 @@ export default function AdminPage() {
 
   const go = useCallback((t: Tab) => {
     setTab(t);
-    window.history.replaceState(null, "", t === "overview" ? "/admin" : `/admin?tab=${t}`);
+    window.history.replaceState(null, "", pageUrl("/admin", t === "overview" ? "" : `?tab=${t}`));
   }, []);
   const tabs = useMemo(() => [
     { key: "overview" as Tab, label: "Overview", icon: "sparkles" as IconName },

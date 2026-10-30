@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useId, useState } from "react";
 import { PHOTO_CREDITS } from "@/lib/photos";
+import { asset } from "@/lib/site";
 import { Icon } from "./Icon";
 import ThemeSwitch from "./ThemeSwitch";
 
@@ -13,7 +14,7 @@ export function AuthShell({ title, subtitle, children, footer }: {
   const credit = PHOTO_CREDITS.udaipur;
   return (
     <div className="auth-page">
-      <aside className="auth-photo" style={{ backgroundImage: "url(/photos/udaipur.jpg)" }}>
+      <aside className="auth-photo" style={{ backgroundImage: `url(${asset("/photos/udaipur.jpg")})` }}>
         <Link href="/" className="brand auth-brand">
           <span className="brand-mark"><Icon name="compass" size={19} /></span> Wayfinder
         </Link>

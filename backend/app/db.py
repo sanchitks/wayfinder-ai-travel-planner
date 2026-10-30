@@ -130,6 +130,14 @@ class Visit(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
 
 
+def normalize_db_url(url: str) -> str:
+    """Hosted Postgres (Neon, Render, Supabase) hands out postgres:// or postgresql:// URLs; use psycopg 3."""
+    for prefix in ("postgres://", "postgresql://"):
+        if url.startswith(prefix):
+            return "postgresql+psycopg://" + url[len(prefix):]
+    return url
+
+
 def _make_engine():
     url = get_settings().database_url
     if url.startswith("sqlite:///"):
@@ -144,7 +152,7 @@ def _make_engine():
             cur.close()
 
         return engine
-    return create_engine(url, pool_pre_ping=True)
+    return create_engine(normalize_db_url(url), pool_pre_ping=True, pool_recycle=300)
 
 
 engine = _make_engine()

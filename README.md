@@ -2,6 +2,8 @@
 
 An implementation of the *AI Travel Planning Multi-Agent System* PRD (v1.0). An Orchestrator agent talks to the traveler and sends work to three worker agents (Logistics, Accommodation, Experience). They search travel inventory in parallel. The Orchestrator then combines their results into one bookable itinerary, tailored to the traveler's persona and budget.
 
+**Live demo: [sanchitks.github.io/wayfinder-ai-travel-planner](https://sanchitks.github.io/wayfinder-ai-travel-planner/)** (free hosting: the first visit after a quiet spell takes about a minute while the server wakes up).
+
 ![Wayfinder landing page](docs/screenshots/landing.jpg)
 
 **Built with:** Next.js 16 + React 19 + TypeScript (frontend) · Python FastAPI + LangGraph (backend) · Claude via OpenRouter (agents) · SQLAlchemy + SQLite (accounts) · Leaflet + OSRM (maps).
@@ -113,6 +115,29 @@ Visitors can sign up and log in, at `/signup` and `/login`, and edit their profi
   - It's a starting point written for India's Digital Personal Data Protection Act, 2023. Have it reviewed before a public launch.
 - **Download my data** (Profile → Security, or `GET /api/profile/export`). A JSON file with the customer's profile, saved trips including full itineraries, sign-in methods and recorded visits. It never includes the password or its hash.
 - **Real visitor IPs behind a proxy.** When hosted behind Nginx, Render, Railway, Cloudflare and similar, list the proxy addresses or ranges in `TRUSTED_PROXIES`. Then `X-Forwarded-For` is used for the visit log and login rate limiting (`backend/app/net.py`). It's ignored from anyone else, so visitors can't fake it.
+
+## Deployment (live demo)
+
+The live demo is three free pieces, all deployed from this repository.
+
+| Piece | Where | How it updates |
+|---|---|---|
+| Website (Next.js static export) | GitHub Pages: `https://<user>.github.io/<repo>/` | `.github/workflows/pages.yml` rebuilds on every push to `main` |
+| API server (FastAPI + agents) | [Render](https://render.com) free web service | `render.yaml` Blueprint; auto-deploys on every push |
+| Database (accounts, trips, visits) | [Neon](https://neon.tech) free PostgreSQL | Set as `DATABASE_URL` on Render |
+
+**How login works across two sites.** Browsers block cookies between two different sites (github.io and onrender.com). So the Pages build runs in *token mode* (`NEXT_PUBLIC_AUTH_MODE=token`): after login, the page keeps a session token and sends it in the `Authorization` header. Google sign-in hands the token back in the URL fragment, which never reaches any server, and the page removes it at once. Local development keeps the HttpOnly cookie. `backend/token_mode_test.py` covers this setup.
+
+**Deploy your own copy:**
+1. **Database:** create a free Neon project and copy its connection string.
+2. **Server:** on Render, choose **New → Blueprint** and pick this repository.
+   - Fill in the secret values it asks for: `DATABASE_URL`, `IGNAV_API_KEY`, `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_REDIRECT_URI`, `ADMIN_EMAILS` and `PRIVACY_CONTACT_EMAIL`.
+   - Edit `FRONTEND_URL` and `CORS_ORIGINS` in `render.yaml` to match your own Pages address.
+3. **Website:** in the GitHub repository's settings:
+   - Set **Pages → Source** to **GitHub Actions**.
+   - Add a repository variable `API_URL` with your Render address (for example `https://wayfinder-api.onrender.com`).
+   - Re-run the *Deploy website to GitHub Pages* workflow.
+4. **Google sign-in:** in Google Cloud Console, add `https://<render address>/api/auth/google/callback` as a redirect URI and `https://<user>.github.io` as a JavaScript origin.
 
 ## Quick start
 

@@ -2,6 +2,7 @@
 
 import { createContext, useCallback, useContext, useEffect, useState } from "react";
 import { logout as apiLogout, me, type User } from "@/lib/auth";
+import { takeTokenFromUrl } from "@/lib/site";
 
 interface AuthState {
   user: User | null;
@@ -29,6 +30,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   useEffect(() => {
+    takeTokenFromUrl(); // returning from Google sign-in (token mode)
     void refresh();
   }, [refresh]);
 

@@ -1,3 +1,4 @@
+import { authHeaders } from "./site";
 import type { GeoPoint, Health, RoadRoute, StreamEvent, TravelProfile, TripRequest } from "./types";
 
 // Default: the backend on port 8000 of whatever host served this page, so the login cookie stays
@@ -16,7 +17,7 @@ export class SessionExpiredError extends Error {}
 async function streamPost(path: string, body: unknown, onEvent: (e: StreamEvent) => void, signal?: AbortSignal) {
   const res = await fetch(`${API_URL}${path}`, {
     method: "POST",
-    headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
+    headers: { "Content-Type": "application/json", Accept: "text/event-stream", ...authHeaders() },
     body: JSON.stringify(body),
     credentials: "include", // signed-in users' trips are saved to their account
     signal,

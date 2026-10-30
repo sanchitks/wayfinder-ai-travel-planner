@@ -706,7 +706,7 @@ input[type="range"] { width: 100%; accent-color: var(--accent); }
 .profile-topbar { position: sticky; top: 0; z-index: 900; display: flex; align-items: center; gap: 12px; padding: max(10px, env(safe-area-inset-top)) 20px 10px; background: var(--surface); border-bottom: 1px solid var(--line); }
 .profile-topbar .brand { text-decoration: none; }
 .profile-inner { max-width: 1040px; margin: 0 auto; padding: 0 20px; }
-.profile-hero { position: relative; isolation: isolate; padding: 44px 0 40px; background: url(/photos/hero.jpg) center 45% / cover; color: #fff; margin-bottom: 22px; }
+.profile-hero { position: relative; isolation: isolate; padding: 44px 0 40px; background-position: center 45%; background-size: cover; color: #fff; margin-bottom: 22px; }
 .profile-hero::before { content: ""; position: absolute; inset: 0; z-index: -1; background: linear-gradient(90deg, rgba(28,20,24,.82), rgba(28,20,24,.45)); }
 .profile-hero-inner { display: flex; align-items: center; gap: 22px; }
 .profile-name { font-family: var(--font-display); font-size: clamp(32px, 4vw, 46px); line-height: 1.05; }

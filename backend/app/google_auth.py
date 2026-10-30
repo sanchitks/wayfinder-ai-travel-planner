@@ -40,8 +40,8 @@ ISSUERS = {"accounts.google.com", "https://accounts.google.com"}
 STATE_COOKIE = "wf_oauth_state"
 STATE_TTL = 600  # seconds to finish signing in at Google
 
-# state -> (PKCE verifier, nonce, next path, created at). In memory: fine for one server process.
-_PENDING: dict[str, tuple[str, str, str, float]] = {}
+# state -> (PKCE verifier, nonce, next path, token mode, created at). In memory: fine for one server process.
+_PENDING: dict[str, tuple[str, str, str, bool, float]] = {}
 
 
 class GoogleSignInError(Exception):
@@ -135,15 +135,15 @@ async def providers() -> dict:
 
 
 @router.get("/google/start")
-async def google_start(next: str | None = None) -> RedirectResponse:
+async def google_start(next: str | None = None, mode: str | None = None) -> RedirectResponse:
     s = get_settings()
     if not s.google_enabled:
         return _fail("google_not_configured")
     now = time.time()
-    for k in [k for k, v in _PENDING.items() if now - v[3] > STATE_TTL]:
+    for k in [k for k, v in _PENDING.items() if now - v[4] > STATE_TTL]:
         _PENDING.pop(k, None)
     state, verifier, nonce = secrets.token_urlsafe(24), secrets.token_urlsafe(64), secrets.token_urlsafe(16)
-    _PENDING[state] = (verifier, nonce, _safe_next(next), now)
+    _PENDING[state] = (verifier, nonce, _safe_next(next), mode == "token", now)
     query = urlencode({
         "client_id": s.google_client_id, "redirect_uri": s.google_redirect_uri, "response_type": "code",
         "scope": "openid email profile", "state": state, "nonce": nonce, "prompt": "select_account",
@@ -162,7 +162,7 @@ async def google_callback(request: Request, code: str | None = None, state: str 
     pending = _PENDING.pop(state or "", None)
     if not code or not state or not pending or not cookie_state or not secrets.compare_digest(cookie_state, state):
         return _fail("google_state")
-    verifier, nonce, next_path, created_at = pending
+    verifier, nonce, next_path, wants_token, created_at = pending
     if time.time() - created_at > STATE_TTL:
         return _fail("google_state")
     try:
@@ -175,5 +175,9 @@ async def google_callback(request: Request, code: str | None = None, state: str 
         return _fail("google_failed")
     resp = _to_site(next_path or ("/profile?welcome=1" if created else "/"))
     resp.delete_cookie(STATE_COOKIE, path="/api/auth/google")
-    await asyncio.to_thread(_start_session, resp, user_id)
+    token = await asyncio.to_thread(_start_session, resp, user_id)
+    if wants_token:
+        # Website on another site: hand the token over in the URL fragment, which browsers never
+        # send to any server; the page stores it and removes it from the address bar at once.
+        resp.headers["location"] += f"#wf_token={token}"
     return resp

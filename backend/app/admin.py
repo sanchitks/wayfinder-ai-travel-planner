@@ -87,7 +87,8 @@ async def record_visit(body: VisitIn, request: Request, response: Response,
     path = body.path.split("?")[0].split("#")[0][:300]
     if not path.startswith("/"):
         return
-    vid = request.cookies.get(VISITOR_COOKIE, "")
+    # The page sends its own random ID when cookies can't cross sites (GitHub Pages + API elsewhere).
+    vid = request.headers.get("x-visitor-id", "") or request.cookies.get(VISITOR_COOKIE, "")
     if not re.fullmatch(r"[0-9a-f]{32}", vid):
         vid = secrets.token_hex(16)
         response.set_cookie(VISITOR_COOKIE, vid, max_age=365 * 86400, httponly=True, samesite="lax",

@@ -6,7 +6,8 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "build:pages": "next build && node scripts/fix-export.mjs .next-export"
   },
   "dependencies": {
     "leaflet": "1.9.4",

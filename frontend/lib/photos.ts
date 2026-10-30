@@ -1,3 +1,5 @@
+import { asset } from "./site";
+
 // Photos in /public/photos, from Wikimedia Commons. Their licences (CC BY / CC BY-SA) require this credit.
 export interface PhotoCredit { title: string; author: string; license: string; source: string }
 
@@ -20,5 +22,5 @@ export const PHOTO_CREDITS: Record<string, PhotoCredit> = {
 /** Local photo for a destination name, if we ship one ("Goa" -> /photos/goa.jpg). */
 export function destinationPhoto(name: string): string | null {
   const key = name.split(",")[0].trim().toLowerCase();
-  return key in PHOTO_CREDITS && key !== "hero" ? `/photos/${key}.jpg` : null;
+  return key in PHOTO_CREDITS && key !== "hero" ? asset(`/photos/${key}.jpg`) : null;
 }

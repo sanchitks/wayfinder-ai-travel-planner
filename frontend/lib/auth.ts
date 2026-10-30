@@ -1,4 +1,5 @@
 import { API_URL } from "./api";
+import { authHeaders, setToken, TOKEN_MODE } from "./site";
 import type { Itinerary, Persona } from "./types";
 
 export interface User {
@@ -51,12 +52,12 @@ async function call<T>(method: string, path: string, body?: unknown): Promise<T>
   try {
     res = await fetch(`${API_URL}${path}`, {
       method,
-      credentials: "include", // the HttpOnly login cookie
-      headers: body === undefined ? undefined : { "Content-Type": "application/json" },
+      credentials: "include", // the HttpOnly login cookie (local); token mode uses the header instead
+      headers: { ...authHeaders(), ...(body === undefined ? {} : { "Content-Type": "application/json" }) },
       body: body === undefined ? undefined : JSON.stringify(body),
     });
   } catch {
-    throw new ApiError("Can't reach the server. Is the backend running on port 8000?", 0);
+    throw new ApiError(TOKEN_MODE ? "Can't reach the server. It may be waking up - please try again in a minute." : "Can't reach the server. Is the backend running on port 8000?", 0);
   }
   if (res.status === 204) return undefined as T;
   const data = await res.json().catch(() => ({}));
@@ -75,26 +76,48 @@ async function call<T>(method: string, path: string, body?: unknown): Promise<T>
   return data as T;
 }
 
+/** Sign-up/log-in responses carry the session token in token mode; keep it. */
+async function withToken(p: Promise<User & { session_token?: string | null }>): Promise<User> {
+  const u = await p;
+  if (u.session_token) setToken(u.session_token);
+  return u;
+}
+
 export const signup = (name: string, email: string, password: string) =>
-  call<User>("POST", "/api/auth/signup", { name, email, password });
-export const login = (email: string, password: string) => call<User>("POST", "/api/auth/login", { email, password });
-export const logout = () => call<void>("POST", "/api/auth/logout");
+  withToken(call("POST", "/api/auth/signup", { name, email, password }));
+export const login = (email: string, password: string) => withToken(call("POST", "/api/auth/login", { email, password }));
+export async function logout(): Promise<void> {
+  try {
+    await call<void>("POST", "/api/auth/logout");
+  } finally {
+    setToken(null);
+  }
+}
 
 /** The signed-in user, or null when signed out. */
 export async function me(): Promise<User | null> {
   try {
     return await call<User>("GET", "/api/auth/me");
   } catch (e) {
-    if (e instanceof ApiError && e.status === 401) return null;
+    if (e instanceof ApiError && e.status === 401) {
+      setToken(null); // expired or revoked
+      return null;
+    }
     throw e;
   }
 }
 
 export const updateProfile = (p: ProfileInput) => call<User>("PUT", "/api/profile", p);
-export const changePassword = (current_password: string, new_password: string) =>
-  call<void>("POST", "/api/profile/password", { current_password, new_password });
+export async function changePassword(current_password: string, new_password: string): Promise<void> {
+  // Other sessions are revoked; in token mode the server hands this page its new token.
+  const r = await call<{ session_token?: string } | undefined>("POST", "/api/profile/password", { current_password, new_password });
+  if (r?.session_token) setToken(r.session_token);
+}
 /** Password for normal accounts; Google-only accounts confirm by typing DELETE. */
-export const deleteAccount = (password: string, confirm = "") => call<void>("POST", "/api/profile/delete", { password, confirm });
+export async function deleteAccount(password: string, confirm = ""): Promise<void> {
+  await call<void>("POST", "/api/profile/delete", { password, confirm });
+  setToken(null);
+}
 
 /** Which sign-in options the server has set up. */
 export async function providers(): Promise<{ google: boolean }> {
@@ -106,8 +129,13 @@ export async function providers(): Promise<{ google: boolean }> {
 }
 
 /** Full-page redirect target that starts "Sign in with Google" and comes back to `next`. */
-export const googleStartUrl = (next: string | null) =>
-  `${API_URL}/api/auth/google/start${next ? `?next=${encodeURIComponent(safeNext(next))}` : ""}`;
+export function googleStartUrl(next: string | null): string {
+  const q = new URLSearchParams();
+  if (next) q.set("next", safeNext(next));
+  if (TOKEN_MODE) q.set("mode", "token"); // come back with the token in the URL fragment
+  const qs = q.toString();
+  return `${API_URL}/api/auth/google/start${qs ? `?${qs}` : ""}`;
+}
 
 /** Messages for ?error= codes the Google callback sends back to the login page. */
 export const GOOGLE_ERRORS: Record<string, string> = {
@@ -137,7 +165,7 @@ export const saveSession = (session_id: string) => call<{ trip_id: string }>("PO
 export async function downloadMyData(): Promise<void> {
   let res: Response;
   try {
-    res = await fetch(`${API_URL}/api/profile/export`, { credentials: "include" });
+    res = await fetch(`${API_URL}/api/profile/export`, { credentials: "include", headers: authHeaders() });
   } catch {
     throw new ApiError("Can't reach the server.", 0);
   }

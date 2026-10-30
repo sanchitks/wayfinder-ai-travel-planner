@@ -15,6 +15,7 @@ import {
 } from "@/lib/auth";
 import { DIETS, INTERESTS, PERSONAS, money, nightsBetween, shortDate } from "@/lib/format";
 import { destinationPhoto } from "@/lib/photos";
+import { asset, pageUrl } from "@/lib/site";
 
 type Tab = "profile" | "trips" | "security";
 
@@ -374,7 +375,7 @@ export default function ProfilePage() {
 
   const go = (t: Tab) => {
     setTab(t);
-    window.history.replaceState(null, "", t === "profile" ? "/profile" : `/profile?tab=${t}`);
+    window.history.replaceState(null, "", pageUrl("/profile", t === "profile" ? "" : `?tab=${t}`));
   };
 
   if (loading || !user) {
@@ -392,7 +393,7 @@ export default function ProfilePage() {
         </div>
       </header>
 
-      <section className="profile-hero">
+      <section className="profile-hero" style={{ backgroundImage: `url(${asset("/photos/hero.jpg")})` }}>
         <div className="profile-inner profile-hero-inner">
           <Avatar user={user} large />
           <div className="grow">

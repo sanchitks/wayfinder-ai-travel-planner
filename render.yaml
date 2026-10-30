@@ -1,0 +1,44 @@
+# Render Blueprint: runs the Wayfinder API (FastAPI) on Render's free plan, deployed from this
+# GitHub repository and redeployed automatically on every push. The website itself is on
+# GitHub Pages (.github/workflows/pages.yml) and calls this API.
+# Values marked "sync: false" are secrets/personal: Render asks for them when you create the
+# Blueprint; they are never stored in the repository.
+services:
+  - type: web
+    name: wayfinder-api
+    runtime: python
+    plan: free
+    region: singapore # closest free region to India
+    rootDir: backend
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /api/health
+    autoDeploy: true
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.13.5"
+      # Persistent database (free PostgreSQL from neon.tech); without it accounts reset on every restart.
+      - key: DATABASE_URL
+        sync: false
+      - key: IGNAV_API_KEY
+        sync: false
+      - key: GOOGLE_CLIENT_ID
+        sync: false
+      - key: GOOGLE_CLIENT_SECRET
+        sync: false
+      # https://<this service>.onrender.com/api/auth/google/callback (also add it in Google Cloud Console)
+      - key: GOOGLE_REDIRECT_URI
+        sync: false
+      - key: ADMIN_EMAILS
+        sync: false
+      - key: PRIVACY_CONTACT_EMAIL
+        sync: false
+      - key: FRONTEND_URL
+        value: https://sanchitks.github.io/wayfinder-ai-travel-planner
+      - key: CORS_ORIGINS
+        value: https://sanchitks.github.io
+      - key: COOKIE_SECURE
+        value: "true"
+      # Render's load balancer sits on a private 10.x address and passes the visitor's IP along.
+      - key: TRUSTED_PROXIES
+        value: 10.0.0.0/8

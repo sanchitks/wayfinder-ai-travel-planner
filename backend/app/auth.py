@@ -1,5 +1,10 @@
 """Accounts: sign-up, log-in, profile editing and saved trips.
 
+Two ways to carry the login: an HttpOnly cookie (default, used when the website and API share a
+site, e.g. localhost) or, when the website is hosted on another site (GitHub Pages calling the API
+on Render, where browsers block cross-site cookies), a bearer token the page keeps and sends in the
+Authorization header. The page asks for a token with the header "X-Auth-Mode: token".
+
 Passwords are hashed with scrypt (Python standard library), each with its own
 random salt; plain passwords are never stored or logged. A successful log-in
 sets an HttpOnly, SameSite=Lax cookie holding a random token; the database only
@@ -23,6 +28,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import select
 
@@ -122,6 +128,12 @@ def _new_password(v: str) -> str:
     return v
 
 
+class AuthOut(UserOut):
+    """A user plus, in token mode only, the session token the page must store."""
+
+    session_token: str | None = None
+
+
 class SignupIn(BaseModel):
     name: str = Field(min_length=1, max_length=80)
     email: str
@@ -219,12 +231,26 @@ def _hash_token(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
 
 
-def _start_session(response: Response, user_id: int) -> None:
+def _start_session(response: Response, user_id: int) -> str:
+    """Create a login session; sets the cookie and returns the token (for token mode)."""
     s = get_settings()
     token = secrets.token_urlsafe(32)
     with db_session() as db:
         db.add(LoginSession(token_hash=_hash_token(token), user_id=user_id, expires_at=utcnow() + timedelta(days=s.session_days)))
     response.set_cookie(COOKIE, token, max_age=s.session_days * 86400, httponly=True, samesite="lax", secure=s.cookie_secure, path="/")
+    return token
+
+
+def session_token(request: Request) -> str | None:
+    """The login token from the Authorization header (token mode) or the cookie."""
+    auth = request.headers.get("authorization", "")
+    if auth[:7].lower() == "bearer ":
+        return auth[7:].strip() or None
+    return request.cookies.get(COOKIE)
+
+
+def token_mode(request: Request) -> bool:
+    return request.headers.get("x-auth-mode", "").lower() == "token"
 
 
 def _end_session(response: Response, token: str | None) -> None:
@@ -252,7 +278,7 @@ def user_id_from_token(token: str | None) -> int | None:
 
 
 async def optional_user_id(request: Request) -> int | None:
-    return await asyncio.to_thread(user_id_from_token, request.cookies.get(COOKIE))
+    return await asyncio.to_thread(user_id_from_token, session_token(request))
 
 
 async def require_user_id(user_id: int | None = Depends(optional_user_id)) -> int:
@@ -306,7 +332,7 @@ def _summary(t: Trip) -> TripSummary:
 
 # ---------- routes ----------
 @router.post("/auth/signup", status_code=201)
-async def signup(body: SignupIn, response: Response, request: Request) -> UserOut:
+async def signup(body: SignupIn, response: Response, request: Request) -> AuthOut:
     _check_rate(f"signup:{_client(request)}")
 
     def create() -> int:
@@ -320,12 +346,13 @@ async def signup(body: SignupIn, response: Response, request: Request) -> UserOu
             return u.id
 
     user_id = await asyncio.to_thread(create)
-    await asyncio.to_thread(_start_session, response, user_id)
-    return await asyncio.to_thread(_load_user, user_id)
+    token = await asyncio.to_thread(_start_session, response, user_id)
+    user = await asyncio.to_thread(_load_user, user_id)
+    return AuthOut(**user.model_dump(), session_token=token if token_mode(request) else None)
 
 
 @router.post("/auth/login")
-async def login(body: LoginIn, response: Response, request: Request) -> UserOut:
+async def login(body: LoginIn, response: Response, request: Request) -> AuthOut:
     key = f"login:{_client(request)}"
     _check_rate(key)
 
@@ -340,13 +367,14 @@ async def login(body: LoginIn, response: Response, request: Request) -> UserOut:
         _FAILS[key].append(time.monotonic())
         raise HTTPException(401, "Email or password is incorrect.")
     _FAILS.pop(key, None)
-    await asyncio.to_thread(_start_session, response, user_id)
-    return await asyncio.to_thread(_load_user, user_id)
+    token = await asyncio.to_thread(_start_session, response, user_id)
+    user = await asyncio.to_thread(_load_user, user_id)
+    return AuthOut(**user.model_dump(), session_token=token if token_mode(request) else None)
 
 
 @router.post("/auth/logout", status_code=204)
 async def logout(request: Request, response: Response) -> None:
-    await asyncio.to_thread(_end_session, response, request.cookies.get(COOKIE))
+    await asyncio.to_thread(_end_session, response, session_token(request))
 
 
 @router.get("/auth/me")
@@ -366,8 +394,9 @@ async def update_profile(body: ProfileIn, user_id: int = Depends(require_user_id
     return await asyncio.to_thread(_load_user, user_id)
 
 
-@router.post("/profile/password", status_code=204)
-async def change_password(body: PasswordIn, request: Request, response: Response, user_id: int = Depends(require_user_id)) -> None:
+@router.post("/profile/password", status_code=204, response_model=None)
+async def change_password(body: PasswordIn, request: Request, response: Response,
+                          user_id: int = Depends(require_user_id)) -> Response | None:
     key = f"password:{_client(request)}"
     _check_rate(key)
 
@@ -385,7 +414,10 @@ async def change_password(body: PasswordIn, request: Request, response: Response
     if not await asyncio.to_thread(change):
         _FAILS[key].append(time.monotonic())
         raise HTTPException(400, "Your current password is incorrect.")
-    await asyncio.to_thread(_start_session, response, user_id)
+    token = await asyncio.to_thread(_start_session, response, user_id)
+    if token_mode(request):  # the old token was just revoked: hand the page its new one
+        return JSONResponse({"session_token": token})
+    return None
 
 
 @router.post("/profile/delete", status_code=204)
